@@ -1,10 +1,10 @@
 """
 Triage Agent — Gradio Chat UI.
 
-Launches a Gradio chat interface that streams responses from the tool-calling agent
-(agent.py). The agent calls the platform's own LiteLLM router for inference and has
-access to Prometheus and ticketing-system MCP tools (and optionally an OpenShift MCP
-server, if one is configured).
+Launches a Gradio chat interface that streams responses from agent.py, which delegates
+the actual agentic loop to the OGX sidecar (server-side Responses API): OGX calls the
+platform's own LiteLLM router for inference and has native MCP tool calling to
+Prometheus and ticketing-system (and optionally an OpenShift MCP server, if configured).
 """
 
 from __future__ import annotations

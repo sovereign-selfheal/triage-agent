@@ -1,70 +1,40 @@
 """
-Triage agent — calls the platform's own LiteLLM router directly.
+AI Triage Agent — OGX edition.
 
-No more OGX sidecar and no external Nemotron/MaaS endpoint (see AGENTS.md section 3b
-of the gitops repo for the rationale): this agent is an OpenAI-compatible client that
-runs its own tool-calling loop against ``ROUTER_BASE_URL`` (the same public gateway
-external MaaS clients use, `https://router.<appsDomain>/v1`), with model ``auto`` so the
-policy hook of components/litellm-router picks the real target (local model or SOTA) per
-request, exactly like any other client of the platform.
-
-Tools come from one or more MCP servers (prometheus-mcp-server, ticketing-mcp-server,
-and optionally an external Kubernetes-API MCP server) via `mcp_tools.py`.
+Uses the OGX Responses API (server-side agentic loop) instead of a hand-rolled
+tool-calling loop. The OGX server runs as a sidecar container in the same pod
+and handles:
+  - Tool calls to the Prometheus MCP server
+  - Tool calls to the Ticketing MCP server
+  - Tool calls to an optional Kubernetes-API MCP server (OCP_MCP_URL)
+  - Inference via the platform's own LiteLLM router (model "auto"): the same
+    gateway, policy hook and privacy gate that every other client goes
+    through. There is no separate/external model backend for the agent
+    (see gitops/AGENTS.md section 4).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from typing import AsyncIterator
 
-from openai import AsyncOpenAI
-
-from mcp_tools import McpServer, call_tool, list_openai_tools
+import httpx
+from ogx_client import AsyncOgxClient
 
 logger = logging.getLogger(__name__)
 
-ROUTER_BASE_URL = os.getenv("ROUTER_BASE_URL", "http://localhost:4000/v1")
-ROUTER_API_KEY = os.getenv("ROUTER_API_KEY", "")
-ROUTER_MODEL = os.getenv("ROUTER_MODEL", "auto")
-
+OGX_BASE_URL = os.getenv("OGX_BASE_URL", "http://localhost:8321")
 OCP_MCP_URL = os.getenv("OCP_MCP_URL", "")
 PROMETHEUS_MCP_URL = os.getenv("PROMETHEUS_MCP_URL", "http://prometheus-mcp-server.agentic-triage.svc:8080/mcp")
 TICKETING_MCP_URL = os.getenv("TICKETING_MCP_URL", "http://ticketing-mcp-server.agentic-triage.svc:8080/mcp")
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "auto")
 KNOWLEDGE_FILE = os.getenv("KNOWLEDGE_FILE", "/app/knowledge.md")
-
-AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "600"))
-MAX_INFER_ITERS = int(os.getenv("MAX_INFER_ITERS", "18"))
-
-_client = AsyncOpenAI(base_url=ROUTER_BASE_URL, api_key=ROUTER_API_KEY or "unset")
-
-# Cache of (tool_defs, tool_to_server): the MCP servers are stateless and their tool
-# list does not change at runtime, so discovering it once per process is enough.
-_tools_cache: tuple[list[dict], dict[str, str]] | None = None
-
-
-def _mcp_servers() -> list[McpServer]:
-    servers = [
-        McpServer("Prometheus MCP", PROMETHEUS_MCP_URL),
-        McpServer("Ticketing System MCP", TICKETING_MCP_URL),
-    ]
-    if OCP_MCP_URL:
-        servers.append(McpServer("OpenShift MCP", OCP_MCP_URL))
-    return servers
-
-
-async def _tools() -> tuple[list[dict], dict[str, str]]:
-    global _tools_cache
-    if _tools_cache is None:
-        _tools_cache = await list_openai_tools(_mcp_servers())
-        if not _tools_cache[0]:
-            logger.warning("No MCP tools discovered — the agent will answer from the knowledge base alone")
-    return _tools_cache
 
 
 def _load_knowledge() -> str:
+    """Load the application knowledge base baked into the image."""
     try:
         with open(KNOWLEDGE_FILE) as f:
             content = f.read().strip()
@@ -75,31 +45,58 @@ def _load_knowledge() -> str:
         return ""
 
 
-SYSTEM_PROMPT = """You are an OpenShift SRE troubleshooting assistant. Diagnose application \
-problems using the tools available to you, then open an incident ticket and report your findings.
+def _mcp_tools() -> list[dict]:
+    """Build the OGX `tools` list: one entry per MCP server that is configured."""
+    tools = [
+        {
+            "type": "mcp",
+            "server_label": "Prometheus MCP",
+            "server_url": PROMETHEUS_MCP_URL,
+            "require_approval": "never",
+        },
+        {
+            "type": "mcp",
+            "server_label": "Ticketing System MCP",
+            "server_url": TICKETING_MCP_URL,
+            "require_approval": "never",
+        },
+    ]
+    if OCP_MCP_URL:
+        tools.append(
+            {
+                "type": "mcp",
+                "server_label": "OpenShift MCP",
+                "server_url": OCP_MCP_URL,
+                "require_approval": "never",
+            }
+        )
+    else:
+        logger.info("OCP_MCP_URL not set — running without the Kubernetes-API MCP tool")
+    return tools
 
-Tool sources: Prometheus MCP (query_prometheus, query_prometheus_range), Ticketing System \
-MCP (create_incident, list_incidents, get_incident, update_incident, add_work_note), and \
-optionally an OpenShift MCP server (pod/log/event tools) if one is configured.
 
-Useful PromQL for the Quarkus demo app (metrics are summary type — use _count and _sum, \
-never _bucket; the namespace is given in the Application Knowledge Base below):
-- HTTP 5xx: rate(http_server_requests_seconds_count{outcome="SERVER_ERROR"}[5m])
-- HTTP 503: rate(http_server_requests_seconds_count{status="503"}[5m])
-- Avg latency: rate(http_server_requests_seconds_sum[5m]) / rate(http_server_requests_seconds_count[5m])
-- Pod restarts: kube_pod_container_status_restarts_total
+SYSTEM_PROMPT = """You are an OpenShift SRE troubleshooting assistant. Diagnose application problems using the tools below, then open an incident ticket and report your findings.
+
+Tools available:
+
+prometheus: `query_prometheus`, `query_prometheus_range`
+ticketing: `create_incident`, `add_work_note`
+openshift (only if available): `pods_list_in_namespace`, `pods_get`, `nodes_top`
+
+Useful PromQL for the quarkus-buggy-app demo app (metrics are summary type — use _count and _sum, never _bucket):
+- HTTP 5xx: rate(http_server_requests_seconds_count{namespace="agentic-triage",outcome="SERVER_ERROR"}[5m])
+- HTTP 503: rate(http_server_requests_seconds_count{namespace="agentic-triage",status="503"}[5m])
+- Avg latency: rate(http_server_requests_seconds_sum{namespace="agentic-triage"}[5m]) / rate(http_server_requests_seconds_count{namespace="agentic-triage"}[5m])
+- Pod restarts: kube_pod_container_status_restarts_total{namespace="agentic-triage"}
 - If a query returns no data after 2 attempts, stop retrying and report metrics as missing.
-- Call each tool at most once per fact you need; do not repeat an identical call.
 
 Workflow:
-1. If an OpenShift MCP server is available, list pods in the target namespace. Note status and restarts.
-2. Query Prometheus for error rates and latency.
-3. Synthesize a diagnosis from the data you collected.
-4. Call create_incident with: short_description (concise summary), description (your full \
-diagnosis), impact (1=High, 2=Medium, 3=Low), urgency (1/2/3), category ("Application" or \
-"Infrastructure"). Skip this step if you were asked to investigate an existing incident \
-instead (use get_incident / update_incident / add_work_note).
-5. Output your diagnosis report.
+1. If the OpenShift MCP tool is available, list pods in the target namespace (default: agentic-triage). Note status and restarts.
+2. For unhealthy pods, use pods_get to check events and conditions.
+3. Query Prometheus for error rates and latency.
+4. Synthesize a diagnosis from the data you collected.
+5. Call create_incident with: short_description (concise summary), description (your full diagnosis), impact (1=High, 2=Medium, 3=Low), urgency (1/2/3), category ("Application" or "Infrastructure").
+6. Output your diagnosis report.
 
 Report format:
 ## Diagnosis Summary
@@ -108,18 +105,32 @@ Report format:
 **Root Cause:** <why it is happening>
 **Affected Endpoints:** <endpoint, error rate, issue>
 **Recommended Fix:** <actionable steps>
-**Incident:** <ticket number, if one was created or updated>
+**Incident:** <ticket number from create_incident>
 """
 
 
-async def run_agent(user_message: str) -> AsyncIterator[str]:
-    """Stream the agent's response for a given user message.
+AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "600"))
+MAX_INFER_ITERS = int(os.getenv("MAX_INFER_ITERS", "18"))
 
-    Runs its own tool-calling loop against the router (OpenAI-compatible chat
-    completions API): each round either returns tool_calls (executed against the MCP
-    servers, results appended as role="tool" messages) or a final answer.
+
+async def run_agent(user_message: str) -> AsyncIterator[str]:
     """
-    tool_defs, tool_to_server = await _tools()
+    Stream the agent's response for a given user message.
+
+    The OGX server handles the full ReAct loop server-side: it calls the MCP
+    tools, feeds results back to the model (via the platform's LiteLLM
+    router), and streams the final answer.
+
+    Yields:
+        Text chunks (and tool-call status lines) from the agent.
+    """
+    client = AsyncOgxClient(
+        base_url=OGX_BASE_URL,
+        api_key="local",
+        max_retries=5,
+        timeout=httpx.Timeout(connect=30.0, read=AGENT_TIMEOUT_SECONDS, write=30.0, pool=30.0),
+    )
+
     knowledge = _load_knowledge()
     instructions = (
         f"{SYSTEM_PROMPT}\n\n---\n## Application Knowledge Base\n\n{knowledge}"
@@ -127,58 +138,73 @@ async def run_agent(user_message: str) -> AsyncIterator[str]:
         else SYSTEM_PROMPT
     )
 
-    messages: list[dict] = [
-        {"role": "system", "content": instructions},
-        {"role": "user", "content": user_message},
-    ]
+    logger.info("Sending request to OGX at %s", OGX_BASE_URL)
 
-    tool_calls_made = 0
+    try:
+        stream = await asyncio.wait_for(
+            client.responses.create(
+                model=ROUTER_MODEL,
+                input=user_message,
+                instructions=instructions,
+                tools=_mcp_tools(),
+                stream=True,
+                extra_body={"max_infer_iters": MAX_INFER_ITERS},
+            ),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        logger.error("Timed out waiting for OGX to start streaming")
+        yield "\n\n⚠️ **Error:** Timed out connecting to the agent backend. Please try again.\n"
+        return
+    except Exception as exc:
+        logger.exception("Failed to create OGX stream")
+        yield f"\n\n⚠️ **Error:** Could not reach the agent backend: {exc}\n"
+        return
+
+    event_count = 0
+    text_chunks = 0
+    text_bytes = 0
+    tool_calls = 0
     tool_failures = 0
 
     try:
         async with asyncio.timeout(AGENT_TIMEOUT_SECONDS):
-            for _ in range(MAX_INFER_ITERS):
-                logger.info("Calling %s (model=%s), %d messages so far", ROUTER_BASE_URL, ROUTER_MODEL, len(messages))
-                response = await _client.chat.completions.create(
-                    model=ROUTER_MODEL,
-                    messages=messages,
-                    tools=tool_defs or None,
-                    tool_choice="auto" if tool_defs else None,
-                )
-                choice = response.choices[0]
-                message = choice.message
+            async for event in stream:
+                event_count += 1
+                event_type = getattr(event, "type", None)
 
-                if not message.tool_calls:
-                    content = message.content or ""
-                    if not content:
-                        logger.warning("Model returned no content and no tool calls")
-                    yield content
-                    return
+                if event_type == "response.output_text.delta":
+                    text_chunks += 1
+                    text_bytes += len(event.delta)
+                    yield event.delta
 
-                # Echo the assistant turn (with its tool_calls) back into history, then
-                # run every requested tool call and append its result.
-                messages.append(message.model_dump(exclude_none=True))
-                for call in message.tool_calls:
-                    name = call.function.name
-                    try:
-                        arguments = json.loads(call.function.arguments or "{}")
-                    except json.JSONDecodeError:
-                        arguments = {}
-                    server_url = tool_to_server.get(name)
-                    if server_url is None:
-                        result_text = f"Error: unknown tool {name!r} (not registered by any MCP server)"
-                        tool_failures += 1
-                    else:
-                        tool_calls_made += 1
-                        yield f"\n\n> 🔧 Calling `{name}`…\n\n"
-                        result_text = await call_tool(server_url, name, arguments)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": call.id,
-                            "content": result_text,
-                        }
-                    )
+                elif event_type == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    if item and getattr(item, "type", None) == "mcp_call":
+                        tool_calls += 1
+                        server = getattr(item, "server_label", "unknown")
+                        tool = getattr(item, "name", "unknown")
+                        logger.info("Tool call started: %s → %s", server, tool)
+                        yield f"\n\n> 🔧 Calling **{server}** → `{tool}`…\n\n"
+
+                elif event_type == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item and getattr(item, "type", None) == "mcp_call":
+                        server = getattr(item, "server_label", "unknown")
+                        tool = getattr(item, "name", "unknown")
+                        error = getattr(item, "error", None)
+                        if error:
+                            tool_failures += 1
+                            logger.warning("Tool call failed: %s → %s: %s", server, tool, error)
+                            yield f"\n\n> ⚠️ **{server}** → `{tool}` failed: {error}\n\n"
+                        else:
+                            logger.info("Tool call completed: %s → %s", server, tool)
+
+                elif event_type == "response.completed":
+                    resp = getattr(event, "response", None)
+                    status = getattr(resp, "status", "unknown") if resp else "unknown"
+                    logger.info("Stream response.completed — status=%s", status)
+
     except TimeoutError:
         logger.error("Agent exceeded %ds timeout", AGENT_TIMEOUT_SECONDS)
         yield (
@@ -186,15 +212,13 @@ async def run_agent(user_message: str) -> AsyncIterator[str]:
             "This usually means the model got stuck in a tool-calling loop. Please try again "
             "with a more specific question.\n"
         )
-        return
     except Exception as exc:
-        logger.exception("Error during agent run")
+        logger.exception("Error during agent streaming")
         yield f"\n\n⚠️ **Error:** Agent encountered an error: {exc}\n"
-        return
-    finally:
-        logger.info("Agent run finished — tool_calls=%d, tool_failures=%d", tool_calls_made, tool_failures)
 
-    yield (
-        f"\n\n⚠️ **Error:** Stopped after {MAX_INFER_ITERS} tool-calling rounds without a final "
-        "answer. Please try again with a more specific question.\n"
+    logger.info(
+        "Stream finished — events=%d, text_chunks=%d, text_bytes=%d, tool_calls=%d, tool_failures=%d",
+        event_count, text_chunks, text_bytes, tool_calls, tool_failures,
     )
+    if text_chunks == 0:
+        logger.warning("Stream produced no text output — the model may have ended on a tool call without generating a final answer")

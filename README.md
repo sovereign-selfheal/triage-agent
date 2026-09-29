@@ -1,47 +1,61 @@
 # triage-agent
 
-Gradio chat UI + tool-calling agent that investigates `quarkus-buggy-app` using the
-`prometheus-mcp-server` and `ticketing-mcp-server` MCP tools.
+Gradio chat UI backed by an **OGX sidecar** (`ogxai/distribution-starter`, server-side
+Responses API) that investigates `quarkus-buggy-app` using the `prometheus-mcp-server`
+and `ticketing-mcp-server` MCP tools.
 
-Unlike the upstream demo this is based on, this agent has **no OGX sidecar and no
-external Nemotron/MaaS endpoint**: `agent.py` is a plain OpenAI-compatible client that
-runs its own tool-calling loop directly against the platform's LiteLLM router
-(`ROUTER_BASE_URL`, model `auto`), so the same policy hook, privacy gate and local/SOTA
-routing that apply to every other client also apply to this agent's traffic.
+Unlike the upstream demo this is based on, this agent has **no external Nemotron/MaaS
+endpoint**: OGX is configured to call the platform's own LiteLLM router
+(`VLLM_URL` = `https://router.<appsDomain>/v1`, model `auto`) instead, so the same
+policy hook, privacy gate and local/SOTA routing that apply to every other client also
+apply to this agent's traffic. Everything else about OGX — the server-side agentic loop,
+native MCP tool calling, streaming — is unchanged from upstream.
 
 ## Layout
 
 - `app.py` — Gradio UI (chat, streams `agent.py`'s output).
-- `agent.py` — the tool-calling loop: calls the router's `/chat/completions` with
-  `tools=`, executes any `tool_calls` against the MCP servers, repeats until a final
-  answer or `MAX_INFER_ITERS` is reached.
-- `mcp_tools.py` — MCP client (`streamable-http` transport): discovers tools from one or
-  more MCP servers and calls them.
+- `agent.py` — thin client of the OGX Responses API (`ogx_client.AsyncOgxClient`): sends
+  one `responses.create(..., tools=[{"type": "mcp", "server_url": ...}, ...], stream=True)`
+  call per user message and relays the streamed text/tool-call events to the UI. The
+  actual ReAct loop (calling tools, feeding results back to the model, looping until a
+  final answer) runs server-side, inside the OGX sidecar — not in this repo.
+- `start.sh` — waits for the OGX sidecar's `/v1/models` to answer before starting Gradio
+  (the two containers of the pod start independently).
 - `knowledge.md` — static knowledge base about `quarkus-buggy-app`, baked into the image
   (`COPY knowledge.md` in the `Dockerfile`). Edit it here and release a new tag; the
   gitops repo only pins the resulting image digest, same as `app.py`/`agent.py`.
+
+This repo does **not** own the OGX image or its config (`stack_run_config.yaml`): those
+are the gitops repo's ownership, same as any other Kubernetes object (see
+`gitops/components/triage-agent/templates/stack-run-config.yaml`).
 
 ## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `ROUTER_BASE_URL` | `http://localhost:4000/v1` | Platform LiteLLM router, OpenAI-compatible |
-| `ROUTER_API_KEY` | _(empty)_ | Tier API key (gitops mounts it from a generated Secret) |
-| `ROUTER_MODEL` | `auto` | Model alias; `auto` lets the router's policy hook decide |
+| `OGX_BASE_URL` | `http://localhost:8321` | OGX sidecar, same pod |
+| `ROUTER_MODEL` | `auto` | Model name passed to OGX; must match the model registered in the sidecar's `stack_run_config.yaml` |
 | `PROMETHEUS_MCP_URL` | `http://prometheus-mcp-server.agentic-triage.svc:8080/mcp` | |
 | `TICKETING_MCP_URL` | `http://ticketing-mcp-server.agentic-triage.svc:8080/mcp` | |
-| `OCP_MCP_URL` | _(empty)_ | Optional Kubernetes-API MCP server, not part of this import |
+| `OCP_MCP_URL` | _(empty)_ | Optional Kubernetes-API MCP server, not part of this import; omitted from the tool list when empty |
 | `KNOWLEDGE_FILE` | `/app/knowledge.md` | Baked into the image; override only for local dev |
-| `MAX_INFER_ITERS` | `18` | Max tool-calling rounds per user message |
+| `MAX_INFER_ITERS` | `18` | Max tool-calling rounds per user message (passed to OGX as `extra_body.max_infer_iters`) |
 | `AGENT_TIMEOUT_SECONDS` | `600` | Hard timeout for one agent run |
 
+The router credential (`VLLM_API_TOKEN`) and the router URL (`VLLM_URL`) are OGX sidecar
+env vars, not read by this repo's Python code — see the gitops Deployment.
+
 ## Local development
+
+Requires a running OGX server pointed at some OpenAI-compatible backend (the platform
+router, or any local vLLM/Ollama endpoint) — see the [OGX
+docs](https://github.com/ogxai/distribution-starter) for `stack_run_config.yaml` and how
+to run it standalone (e.g. via `uvicorn` or its own container image).
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export ROUTER_BASE_URL=https://router.<appsDomain>/v1
-export ROUTER_API_KEY=<a tier API key>
+export OGX_BASE_URL=http://localhost:8321
 export PROMETHEUS_MCP_URL=http://localhost:8081/mcp   # oc port-forward
 export TICKETING_MCP_URL=http://localhost:8082/mcp    # oc port-forward
 python app.py
@@ -54,10 +68,13 @@ python app.py
 podman build -t quay.io/sovereign-selfheal/triage-agent:<tag> .
 ```
 
-CI (`.github/workflows/build.yml`) does this on every `v*` tag.
+CI (`.github/workflows/build.yml`) does this on every `v*` tag. This only builds the
+Gradio UI image; the OGX sidecar image (`ogxai/distribution-starter`) is a third-party
+image pulled straight from Docker Hub, pinned by digest in the gitops repo.
 
 ## Consumer
 
-Kubernetes manifests (ServiceAccount, tier credential, Deployment, Service, Route) and
-the pinned image digest live in the `gitops` repo, `components/triage-agent/`. This repo
-only owns the source and the build.
+Kubernetes manifests (ServiceAccount, tier credential, OGX config ConfigMap, Deployment
+with both containers, Service, Route) and the pinned image digests live in the `gitops`
+repo, `components/triage-agent/`. This repo only owns the source and the build of the
+Gradio UI container.

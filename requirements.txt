@@ -1,13 +1,8 @@
+# OGX client — Responses API with server-side agentic loop (MCP tool calling included)
+ogx_client>=1.0.0
+
 # Gradio web UI — pinned to 5.x; Gradio 6.0 has breaking Chatbot API changes
 gradio>=5.0.0,<6.0.0
-
-# OpenAI-compatible client used to call the platform LiteLLM router directly
-# (no OGX sidecar, no external MaaS: see AGENTS.md section 3b of the gitops repo).
-openai>=1.40.0
-
-# MCP client SDK (streamable-http transport) used to call prometheus-mcp-server and
-# ticketing-mcp-server.
-mcp>=1.2.0
 
 # Async
 anyio>=4.4.0
