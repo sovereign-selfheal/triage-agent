@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to quay.io
+        run: |
+          echo "${{ secrets.QUAY_PASSWORD }}" | podman login quay.io \
+            -u "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+      - name: Build
+        run: podman build -t "quay.io/sovereign-selfheal/triage-agent:${GITHUB_REF_NAME}" .
+
+      - name: Push
+        run: podman push "quay.io/sovereign-selfheal/triage-agent:${GITHUB_REF_NAME}"
+
+      - name: Resolve pushed digest
+        run: |
+          skopeo inspect "docker://quay.io/sovereign-selfheal/triage-agent:${GITHUB_REF_NAME}" \
+            | tee /tmp/inspect.json
+          echo "Digest: $(jq -r .Digest /tmp/inspect.json)"
+          echo "Copy this digest into gitops components/triage-agent/values.yaml"
