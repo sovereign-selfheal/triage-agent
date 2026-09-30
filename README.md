@@ -68,9 +68,11 @@ python app.py
 podman build -t quay.io/sovereign-selfheal/triage-agent:<tag> .
 ```
 
-CI (`.github/workflows/build.yml`) does this on every `v*` tag. This only builds the
-Gradio UI image; the OGX sidecar image (`ogxai/distribution-starter`) is a third-party
-image pulled straight from Docker Hub, pinned by digest in the gitops repo.
+CI (`.github/workflows/build.yml`) runs on pull requests and pushes to `main` to verify
+that this image builds (no push). Quay builds/pushes the tagged release image separately.
+This only concerns the Gradio UI image; the OGX sidecar image
+(`ogxai/distribution-starter`) is a third-party image pulled straight from Docker Hub,
+pinned by digest in the gitops repo.
 
 ## Consumer
 
