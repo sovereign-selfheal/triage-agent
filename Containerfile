@@ -7,7 +7,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && rm 
 
 # Install dependencies first (layer cache)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 180 -r requirements.txt
 
 # Copy application source
 COPY app.py agent.py start.sh ./
