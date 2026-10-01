@@ -9,9 +9,8 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && rm 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source. knowledge.md is baked into the image (no ConfigMap in gitops:
-# this repo's images are reference-only, like presidio; see gitops/AGENTS.md section 4).
-COPY app.py agent.py start.sh knowledge.md ./
+# Copy application source
+COPY app.py agent.py start.sh ./
 
 # Non-root user for OpenShift compatibility
 RUN useradd -u 1001 -r -g 0 -d /app -s /sbin/nologin appuser && \

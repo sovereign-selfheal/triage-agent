@@ -22,7 +22,7 @@ native MCP tool calling, streaming — is unchanged from upstream.
 - `start.sh` — waits for the OGX sidecar's `/v1/models` to answer before starting Gradio
   (the two containers of the pod start independently).
 - `knowledge.md` — static knowledge base about `quarkus-buggy-app`, baked into the image
-  (`COPY knowledge.md` in the `Dockerfile`). Edit it here and release a new tag; the
+  (`COPY knowledge.md` in the `Containerfile`). Edit it here and release a new tag; the
   gitops repo only pins the resulting image digest, same as `app.py`/`agent.py`.
 
 This repo does **not** own the OGX image or its config (`stack_run_config.yaml`): those
