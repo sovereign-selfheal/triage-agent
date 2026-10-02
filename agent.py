@@ -30,11 +30,11 @@ OCP_MCP_URL = os.getenv("OCP_MCP_URL", "")
 PROMETHEUS_MCP_URL = os.getenv("PROMETHEUS_MCP_URL", "http://prometheus-mcp-server.agentic-triage.svc:8080/mcp")
 TICKETING_MCP_URL = os.getenv("TICKETING_MCP_URL", "http://ticketing-mcp-server.agentic-triage.svc:8080/mcp")
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", "auto")
-KNOWLEDGE_FILE = os.getenv("KNOWLEDGE_FILE", "/app/knowledge.md")
+KNOWLEDGE_FILE = os.getenv("KNOWLEDGE_FILE", "/etc/triage-agent/knowledge.md")
 
 
 def _load_knowledge() -> str:
-    """Load the application knowledge base baked into the image."""
+    """Load the application knowledge base from KNOWLEDGE_FILE (typically a mounted ConfigMap)."""
     try:
         with open(KNOWLEDGE_FILE) as f:
             content = f.read().strip()

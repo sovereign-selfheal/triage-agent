@@ -21,9 +21,9 @@ native MCP tool calling, streaming — is unchanged from upstream.
   final answer) runs server-side, inside the OGX sidecar — not in this repo.
 - `start.sh` — waits for the OGX sidecar's `/v1/models` to answer before starting Gradio
   (the two containers of the pod start independently).
-- `knowledge.md` — static knowledge base about `quarkus-buggy-app`, baked into the image
-  (`COPY knowledge.md` in the `Containerfile`). Edit it here and release a new tag; the
-  gitops repo only pins the resulting image digest, same as `app.py`/`agent.py`.
+- `knowledge.md` — sample knowledge base for local dev (see `KNOWLEDGE_FILE`). On cluster,
+  gitops mounts the real content from a ConfigMap (`components/triage-agent/files/knowledge.md`)
+  so each agent instance can ship different knowledge without rebuilding the image.
 
 This repo does **not** own the OGX image or its config (`stack_run_config.yaml`): those
 are the gitops repo's ownership, same as any other Kubernetes object (see
@@ -38,7 +38,7 @@ are the gitops repo's ownership, same as any other Kubernetes object (see
 | `PROMETHEUS_MCP_URL` | `http://prometheus-mcp-server.agentic-triage.svc:8080/mcp` | |
 | `TICKETING_MCP_URL` | `http://ticketing-mcp-server.agentic-triage.svc:8080/mcp` | |
 | `OCP_MCP_URL` | _(empty)_ | Optional Kubernetes-API MCP server, not part of this import; omitted from the tool list when empty |
-| `KNOWLEDGE_FILE` | `/app/knowledge.md` | Baked into the image; override only for local dev |
+| `KNOWLEDGE_FILE` | `/etc/triage-agent/knowledge.md` | Path to the mounted knowledge file; set to `./knowledge.md` for local dev |
 | `MAX_INFER_ITERS` | `18` | Max tool-calling rounds per user message (passed to OGX as `extra_body.max_infer_iters`) |
 | `AGENT_TIMEOUT_SECONDS` | `600` | Hard timeout for one agent run |
 
@@ -58,6 +58,7 @@ pip install -r requirements.txt
 export OGX_BASE_URL=http://localhost:8321
 export PROMETHEUS_MCP_URL=http://localhost:8081/mcp   # oc port-forward
 export TICKETING_MCP_URL=http://localhost:8082/mcp    # oc port-forward
+export KNOWLEDGE_FILE="$(pwd)/knowledge.md"
 python app.py
 # Open http://localhost:7860
 ```
@@ -76,7 +77,8 @@ pinned by digest in the gitops repo.
 
 ## Consumer
 
-Kubernetes manifests (ServiceAccount, tier credential, OGX config ConfigMap, Deployment
-with both containers, Service, Route) and the pinned image digests live in the `gitops`
-repo, `components/triage-agent/`. This repo only owns the source and the build of the
-Gradio UI container.
+Kubernetes manifests (ServiceAccount, tier credential, OGX and knowledge ConfigMaps,
+Deployment with both containers, Service, Route) and the pinned image digests live in the
+`gitops` repo, `components/triage-agent/`. This repo only owns the source and the build of
+the Gradio UI container; deploy-time knowledge lives under
+`gitops/components/triage-agent/files/`.
