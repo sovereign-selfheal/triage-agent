@@ -13,7 +13,8 @@ native MCP tool calling, streaming — is unchanged from upstream.
 
 ## Layout
 
-- `app.py` — Gradio UI (chat, streams `agent.py`'s output).
+- `app.py` — Gradio UI (chat, streams `agent.py`'s output), mounted inside a small
+  FastAPI app that also exposes `POST /trigger` (see below) on the same port.
 - `agent.py` — thin client of the OGX Responses API (`ogx_client.AsyncOgxClient`): sends
   one `responses.create(..., tools=[{"type": "mcp", "server_url": ...}, ...], stream=True)`
   call per user message and relays the streamed text/tool-call events to the UI. The
@@ -28,6 +29,26 @@ native MCP tool calling, streaming — is unchanged from upstream.
 This repo does **not** own the OGX image or its config (`stack_run_config.yaml`): those
 are the gitops repo's ownership, same as any other Kubernetes object (see
 `gitops/components/triage-agent/templates/stack-run-config.yaml`).
+
+## Programmatic trigger (`POST /trigger`)
+
+Besides the Gradio UI, the same process exposes a small FastAPI route on the same port
+(`7860`) for non-interactive callers — today, the `ogx-alert-translator` Alertmanager
+bridge:
+
+```
+POST /trigger
+Content-Type: application/json
+
+{"input": "<free-text instructions for the agent>"}
+```
+
+Returns **202** immediately (`{"status": "accepted"}`) and runs `agent.run_agent()` to
+completion in a background task, logging the outcome. This is the **only** entry point
+other services should use to drive the agent: it reuses the exact same system prompt,
+MCP tool wiring, knowledge base and model selection as the chat UI (`agent.py`), so no
+other repo re-implements or duplicates the agent definition. Callers only ever provide
+the user-facing input text.
 
 ## Environment variables
 

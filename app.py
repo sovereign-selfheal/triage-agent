@@ -17,6 +17,9 @@ import os
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
 import gradio as gr
+from fastapi import BackgroundTasks, FastAPI
+from gradio import mount_gradio_app
+from pydantic import BaseModel
 
 from agent import run_agent
 
@@ -150,11 +153,49 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
-if __name__ == "__main__":
-    port = int(os.getenv("GRADIO_PORT", "7860"))
+# ── Programmatic trigger endpoint (used by ogx-alert-translator) ───────────────
+#
+# This is the single entry point for callers that are not the Gradio UI (today: the
+# Alertmanager bridge). It reuses `run_agent()` from agent.py — the one place that owns
+# the system prompt, MCP tool wiring, knowledge base and model selection — so no other
+# service re-implements or duplicates the agent definition. Callers only supply the
+# user-facing input text; everything else about "how the agent investigates" lives here.
+class TriggerRequest(BaseModel):
+    input: str
+
+
+async def _run_and_log(message: str) -> None:
+    """Run the agent to completion in the background and log the outcome.
+
+    Mirrors the UI's streaming consumption in `chat()`, but discards the chunks (no
+    caller is listening synchronously) — only the final length/outcome is logged.
+    """
+    logger.info("Triggered run starting: %s", message[:120])
+    response_so_far = ""
+    async for chunk in run_agent(message):
+        response_so_far += chunk
+    logger.info("Triggered run finished (%d chars)", len(response_so_far))
+
+
+def build_app() -> FastAPI:
+    """Build the FastAPI app: Gradio UI mounted at '/', plus the /trigger API route."""
+    fastapi_app = FastAPI(title="triage-agent")
+
+    @fastapi_app.post("/trigger", status_code=202)
+    async def trigger(payload: TriggerRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
+        if not payload.input.strip():
+            return {"status": "rejected", "reason": "empty_input"}
+        background_tasks.add_task(_run_and_log, payload.input)
+        return {"status": "accepted"}
+
     demo = build_ui()
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=port,
-        show_api=False,
-    )
+    return mount_gradio_app(fastapi_app, demo, path="/")
+
+
+app = build_app()
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("GRADIO_PORT", "7860"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
