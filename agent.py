@@ -31,6 +31,15 @@ PROMETHEUS_MCP_URL = os.getenv("PROMETHEUS_MCP_URL", "http://prometheus-mcp-serv
 TICKETING_MCP_URL = os.getenv("TICKETING_MCP_URL", "http://ticketing-mcp-server.agentic-triage.svc:8080/mcp")
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", "auto")
 KNOWLEDGE_FILE = os.getenv("KNOWLEDGE_FILE", "/etc/triage-agent/knowledge.md")
+# Send the namespaces of the investigation to the router on every LLM call (body field
+# `selfheal_namespaces`, router v0.11.0 namespace policy): a request about a namespace
+# labelled sovereign-selfheal.io/data-class=restricted stays on the local model.
+ROUTER_NAMESPACE_HINT = os.getenv("ROUTER_NAMESPACE_HINT", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 def _load_knowledge() -> str:
@@ -83,15 +92,17 @@ prometheus: `query_prometheus`, `query_prometheus_range`
 ticketing: `create_incident`, `add_work_note`
 openshift (only if available): `pods_list_in_namespace`, `pods_get`, `nodes_top`
 
+The quarkus-buggy-app demo app runs in more than one namespace. The target namespace is the `namespace` label of the alert, or the one named in the question. Put it in place of <namespace> in every query; never assume a default namespace.
+
 Useful PromQL for the quarkus-buggy-app demo app (metrics are summary type — use _count and _sum, never _bucket):
-- HTTP 5xx: rate(http_server_requests_seconds_count{namespace="agentic-triage",outcome="SERVER_ERROR"}[5m])
-- HTTP 503: rate(http_server_requests_seconds_count{namespace="agentic-triage",status="503"}[5m])
-- Avg latency: rate(http_server_requests_seconds_sum{namespace="agentic-triage"}[5m]) / rate(http_server_requests_seconds_count{namespace="agentic-triage"}[5m])
-- Pod restarts: kube_pod_container_status_restarts_total{namespace="agentic-triage"}
+- HTTP 5xx: rate(http_server_requests_seconds_count{namespace="<namespace>",outcome="SERVER_ERROR"}[5m])
+- HTTP 503: rate(http_server_requests_seconds_count{namespace="<namespace>",status="503"}[5m])
+- Avg latency: rate(http_server_requests_seconds_sum{namespace="<namespace>"}[5m]) / rate(http_server_requests_seconds_count{namespace="<namespace>"}[5m])
+- Pod restarts: kube_pod_container_status_restarts_total{namespace="<namespace>"}
 - If a query returns no data after 2 attempts, stop retrying and report metrics as missing.
 
 Workflow:
-1. If the OpenShift MCP tool is available, list pods in the target namespace (default: agentic-triage). Note status and restarts.
+1. If the OpenShift MCP tool is available, list pods in the target namespace. Note status and restarts.
 2. For unhealthy pods, use pods_get to check events and conditions.
 3. Query Prometheus for error rates and latency.
 4. Synthesize a diagnosis from the data you collected.
@@ -113,9 +124,13 @@ AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "600"))
 MAX_INFER_ITERS = int(os.getenv("MAX_INFER_ITERS", "18"))
 
 
-async def run_agent(user_message: str) -> AsyncIterator[str]:
+async def run_agent(user_message: str, namespaces: list[str] | None = None) -> AsyncIterator[str]:
     """
     Stream the agent's response for a given user message.
+
+    `namespaces` are the namespaces of the investigation (from /trigger). With
+    ROUTER_NAMESPACE_HINT on, OGX copies them into every LLM call it makes for this
+    run (inner `extra_body`), so the router sees them on each tool-loop round.
 
     The OGX server handles the full ReAct loop server-side: it calls the MCP
     tools, feeds results back to the model (via the platform's LiteLLM
@@ -138,7 +153,12 @@ async def run_agent(user_message: str) -> AsyncIterator[str]:
         else SYSTEM_PROMPT
     )
 
-    logger.info("Sending request to OGX at %s", OGX_BASE_URL)
+    extra_body: dict = {"max_infer_iters": MAX_INFER_ITERS}
+    if ROUTER_NAMESPACE_HINT and namespaces:
+        # OGX reads the inner `extra_body` and adds its keys to each chat completion.
+        extra_body["extra_body"] = {"selfheal_namespaces": list(namespaces)}
+
+    logger.info("Sending request to OGX at %s (namespaces=%s, hint=%s)", OGX_BASE_URL, namespaces, ROUTER_NAMESPACE_HINT)
 
     try:
         stream = await asyncio.wait_for(
@@ -148,7 +168,7 @@ async def run_agent(user_message: str) -> AsyncIterator[str]:
                 instructions=instructions,
                 tools=_mcp_tools(),
                 stream=True,
-                extra_body={"max_infer_iters": MAX_INFER_ITERS},
+                extra_body=extra_body,
             ),
             timeout=60,
         )

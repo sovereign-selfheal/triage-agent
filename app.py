@@ -162,17 +162,20 @@ def build_ui() -> gr.Blocks:
 # user-facing input text; everything else about "how the agent investigates" lives here.
 class TriggerRequest(BaseModel):
     input: str
+    # Namespaces of the investigation (ogx-alert-translator: the `namespace` labels of the
+    # alerts). Passed to the router when ROUTER_NAMESPACE_HINT is on (see agent.py).
+    namespaces: list[str] = []
 
 
-async def _run_and_log(message: str) -> None:
+async def _run_and_log(message: str, namespaces: list[str] | None = None) -> None:
     """Run the agent to completion in the background and log the outcome.
 
     Mirrors the UI's streaming consumption in `chat()`, but discards the chunks (no
     caller is listening synchronously) — only the final length/outcome is logged.
     """
-    logger.info("Triggered run starting: %s", message[:120])
+    logger.info("Triggered run starting (namespaces=%s): %s", namespaces, message[:120])
     response_so_far = ""
-    async for chunk in run_agent(message):
+    async for chunk in run_agent(message, namespaces):
         response_so_far += chunk
     logger.info("Triggered run finished (%d chars)", len(response_so_far))
 
@@ -185,7 +188,7 @@ def build_app() -> FastAPI:
     async def trigger(payload: TriggerRequest, background_tasks: BackgroundTasks) -> dict[str, str]:
         if not payload.input.strip():
             return {"status": "rejected", "reason": "empty_input"}
-        background_tasks.add_task(_run_and_log, payload.input)
+        background_tasks.add_task(_run_and_log, payload.input, payload.namespaces)
         return {"status": "accepted"}
 
     demo = build_ui()

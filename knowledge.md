@@ -3,7 +3,7 @@
 ## Overview
 
 **Application name:** `quarkus-buggy-app`  
-**Namespace:** `agentic-triage`  
+**Namespace:** one instance per namespace. Use the namespace of the alert (label `namespace`) or of the question, and put it in place of `<namespace>` in every query and command below. Never assume a default namespace.  
 **Technology:** Quarkus 3.8 (Java), RESTEasy Reactive, Micrometer + Prometheus metrics, SmallRye Health  
 **Purpose:** A deliberately broken demo application used to showcase AI-driven troubleshooting. It intentionally injects failures to simulate real-world incidents.
 
@@ -13,9 +13,9 @@
 
 | Resource | Details |
 |----------|---------|
-| Deployment | `quarkus-buggy-app` in namespace `agentic-triage` |
+| Deployment | `quarkus-buggy-app` in namespace `<namespace>` |
 | Service | `quarkus-buggy-app` port 8080 (HTTP) |
-| Route | `quarkus-buggy-app-agentic-triage.<appsDomain>` |
+| Route | `quarkus-buggy-app-<namespace>.<appsDomain>` |
 | Replicas | 1 |
 | Container port | 8080 |
 | Health endpoints | `/q/health/live` (liveness), `/q/health/ready` (readiness) |
@@ -64,14 +64,14 @@ This means errors will appear in metrics **even without external traffic**. A po
 
 | What to check | PromQL |
 |---------------|--------|
-| HTTP 5xx rate (all endpoints) | `rate(http_server_requests_seconds_count{namespace="agentic-triage",outcome="SERVER_ERROR"}[5m])` |
-| HTTP 500 rate on /api/products | `rate(http_server_requests_seconds_count{namespace="agentic-triage",uri="/api/products",status="500"}[5m])` |
-| HTTP 503 rate on /api/inventory | `rate(http_server_requests_seconds_count{namespace="agentic-triage",uri="/api/inventory",status="503"}[5m])` |
-| Avg latency on /api/orders | `rate(http_server_requests_seconds_sum{namespace="agentic-triage",uri="/api/orders"}[5m]) / rate(http_server_requests_seconds_count{namespace="agentic-triage",uri="/api/orders"}[5m])` |
-| Avg latency all endpoints | `rate(http_server_requests_seconds_sum{namespace="agentic-triage"}[5m]) / rate(http_server_requests_seconds_count{namespace="agentic-triage"}[5m])` |
-| Request rate (all endpoints) | `rate(http_server_requests_seconds_count{namespace="agentic-triage"}[5m])` |
-| Pod restarts | `kube_pod_container_status_restarts_total{namespace="agentic-triage"}` |
-| Pod ready | `kube_pod_status_ready{namespace="agentic-triage"}` |
+| HTTP 5xx rate (all endpoints) | `rate(http_server_requests_seconds_count{namespace="<namespace>",outcome="SERVER_ERROR"}[5m])` |
+| HTTP 500 rate on /api/products | `rate(http_server_requests_seconds_count{namespace="<namespace>",uri="/api/products",status="500"}[5m])` |
+| HTTP 503 rate on /api/inventory | `rate(http_server_requests_seconds_count{namespace="<namespace>",uri="/api/inventory",status="503"}[5m])` |
+| Avg latency on /api/orders | `rate(http_server_requests_seconds_sum{namespace="<namespace>",uri="/api/orders"}[5m]) / rate(http_server_requests_seconds_count{namespace="<namespace>",uri="/api/orders"}[5m])` |
+| Avg latency all endpoints | `rate(http_server_requests_seconds_sum{namespace="<namespace>"}[5m]) / rate(http_server_requests_seconds_count{namespace="<namespace>"}[5m])` |
+| Request rate (all endpoints) | `rate(http_server_requests_seconds_count{namespace="<namespace>"}[5m])` |
+| Pod restarts | `kube_pod_container_status_restarts_total{namespace="<namespace>"}` |
+| Pod ready | `kube_pod_status_ready{namespace="<namespace>"}` |
 
 ---
 
@@ -113,7 +113,7 @@ This means errors will appear in metrics **even without external traffic**. A po
 ### 5. No metrics in Prometheus (UNEXPECTED)
 - **Root cause:** ServiceMonitor not applied, wrong label selector, or pod not running
 - **Symptom:** All PromQL queries return empty results
-- **Fix:** Check `oc get servicemonitor -n agentic-triage`, verify labels match the Service
+- **Fix:** Check `oc get servicemonitor -n <namespace>`, verify labels match the Service
 
 ---
 

@@ -40,8 +40,14 @@ bridge:
 POST /trigger
 Content-Type: application/json
 
-{"input": "<free-text instructions for the agent>"}
+{"input": "<free-text instructions for the agent>", "namespaces": ["<namespace>", ...]}
 ```
+
+`namespaces` is optional: the namespaces of the investigation (ogx-alert-translator sends the
+`namespace` labels of the alerts). With `ROUTER_NAMESPACE_HINT=true` the agent sends them to the
+router on every LLM call (body field `selfheal_namespaces`, through OGX), and the router keeps a
+request about a namespace labelled `sovereign-selfheal.io/data-class=restricted` on the local model
+(router v0.11.0, namespace policy; contract in the router repo, `docs/namespace-policy.md`).
 
 Returns **202** immediately (`{"status": "accepted"}`) and runs `agent.run_agent()` to
 completion in a background task, logging the outcome. This is the **only** entry point
@@ -62,6 +68,7 @@ the user-facing input text.
 | `KNOWLEDGE_FILE` | `/etc/triage-agent/knowledge.md` | Path to the mounted knowledge file; set to `./knowledge.md` for local dev |
 | `MAX_INFER_ITERS` | `18` | Max tool-calling rounds per user message (passed to OGX as `extra_body.max_infer_iters`) |
 | `AGENT_TIMEOUT_SECONDS` | `600` | Hard timeout for one agent run |
+| `ROUTER_NAMESPACE_HINT` | `false` | `true`: send the `namespaces` of `/trigger` to the router on every LLM call (OGX `extra_body.extra_body.selfheal_namespaces`) |
 
 The router credential (`VLLM_API_TOKEN`) and the router URL (`VLLM_URL`) are OGX sidecar
 env vars, not read by this repo's Python code — see the gitops Deployment.
